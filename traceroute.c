@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <netinet/ip_icmp.h>
 #include <sys/time.h>
+#include <limits.h>
 
 /* GLOBALS */
 pid_t pid = -1;
@@ -28,7 +29,7 @@ struct record_out {
 };
 
 struct record_in {
-  u_int8_t* packet;
+  u_int8_t packet[IP_MAXPACKET + 1];
   struct timeval time;
   struct sockaddr_in sender;
 };
@@ -63,14 +64,12 @@ struct icmphdr make_icmp_header()
   return icmp_header;
 }
 
-ssize_t send_packet(struct sockaddr_in* addr_to, struct record_out* recs_out, int sockfd, int* ttl)
+ssize_t send_packet(int sockfd, struct sockaddr_in* addr_to, struct record_out* rec_out, int* ttl)
 {
   struct icmphdr icmp_header = make_icmp_header();
-  recs_out[seq_num].ttl = *ttl;
-  recs_out[seq_num].seq = seq_num;
-  gettimeofday(&(recs_out[seq_num].time), NULL);
-
-  ++seq_num;
+  (*rec_out).ttl = *ttl;
+  (*rec_out).seq = seq_num++;
+  gettimeofday(&((*rec_out).time), NULL);
 
   if(setsockopt(sockfd, IPPROTO_IP, IP_TTL, ttl, sizeof(int))) {
     fprintf(stderr, "send_packet_with_ttl error: %s\n", strerror(errno));
@@ -98,6 +97,7 @@ ssize_t get_packet(int sockfd, struct timeval* tv, struct record_in* rec_in)
   FD_ZERO(&descriptors);
   FD_SET(sockfd, &descriptors);
 
+  // TODO: handle timeout by hand
   int ready = select(sockfd+1, &descriptors, NULL, NULL, tv);
 
   if(ready == -1) {
@@ -113,7 +113,6 @@ ssize_t get_packet(int sockfd, struct timeval* tv, struct record_in* rec_in)
       return -1;
     }
 
-    rec_in->packet = (u_int8_t*)malloc(sizeof(u_int8_t) * packet_len);
     memcpy(rec_in->packet, buffer, packet_len);
     gettimeofday(&(rec_in->time), NULL);
     rec_in->sender = sender;
@@ -122,17 +121,64 @@ ssize_t get_packet(int sockfd, struct timeval* tv, struct record_in* rec_in)
   }
 }
 
-ssize_t get_packets(struct record_in* recs_in, int sockfd, int n_pcks, int recs_max, int tm_lim)
+void get_packet_info(u_int8_t* packet, int* seq, int* pid, int* type)
+{
+  u_int8_t icmp_header_len = 8; // in bytes
+  struct iphdr* ip_header = (struct iphdr*) packet;
+
+  u_int8_t ip_header_len = 4 * ip_header->ihl;
+  u_int8_t* icmp_packet = packet + ip_header_len;
+
+  struct icmphdr* icmp_header = (struct icmphdr*) icmp_packet;
+
+  if(type)
+    *type = icmp_header->type;
+
+  if(icmp_header->type == ICMP_TIME_EXCEEDED) {
+    u_int8_t* icmp_data_ip_header = (void *)(icmp_header) + icmp_header_len;
+    struct icmphdr* icmp_data_icmp_header = (struct icmphdr*)(icmp_data_ip_header + ip_header_len);
+    if(pid)
+      *pid = ntohs(icmp_data_icmp_header->un.echo.id);
+    if(seq)
+      *seq = ntohs(icmp_data_icmp_header->un.echo.sequence);
+  } else if(icmp_header->type == ICMP_ECHOREPLY) {
+    if(pid)
+      *pid = ntohs(icmp_header->un.echo.id);
+    if(seq)
+      *seq = ntohs(icmp_header->un.echo.sequence);
+  }
+}
+
+ssize_t is_record_from_current_round(struct record_in* rec, int seq_min, int seq_max)
+{
+  int seq;
+  get_packet_info(rec->packet, &seq, NULL, NULL);
+  return seq >= seq_min && seq <= seq_max;
+}
+
+ssize_t get_packets(int sockfd, struct record_in* recs_in, int n_pcks, int tm_lim, int ttl)
 {
   ssize_t cnt = 0;
   struct timeval tv; tv.tv_sec = tm_lim; tv.tv_usec = 0;
-  while((tv.tv_sec > 0 || tv.tv_usec > 0) && cnt < recs_max && cnt < n_pcks) {
+
+  while((tv.tv_sec > 0 || tv.tv_usec > 0) && cnt < n_pcks) {
     struct record_in rec_in;
-    int st = get_packet(sockfd, &tv, &rec_in);
-    if(st == 0) {
-      recs_in[cnt++] = rec_in;
+    int status = get_packet(sockfd, &tv, &rec_in);
+    if(status == 0) {
+      int current_max_seq_num = ttl * n_pcks - 1,
+        current_min_seq_num = current_max_seq_num - n_pcks + 1;
+
+      if(! is_record_from_current_round(&rec_in, current_min_seq_num, current_max_seq_num))
+        continue;
+
+      struct record_in* act_record = recs_in + cnt;
+      memcpy(act_record->packet, rec_in.packet, IP_MAXPACKET+1);
+      act_record->time = rec_in.time;
+      act_record->sender = rec_in.sender;
+
+      ++cnt;
     } else {
-      return cnt > 0 ? cnt : st;
+      return cnt > 0 ? cnt : status;
     }
   }
 
@@ -147,69 +193,49 @@ void print_as_bytes (unsigned char* buff, ssize_t length)
 }
 
 
-int display_packets_info(struct record_out* recs_out, struct record_in* recs_in, ssize_t n_pcks, int act_ttl, int max_pcks)
+void display_packets_info(struct record_out* recs_out, struct record_in* recs_in, ssize_t n_pcks, ssize_t max_packets, int ttl)
 {
-  int last_packets_cnt = 0;
-  double av_time = 0.0;
-  u_int32_t last_packet_src  = 0;
   char sender_ip_str[20];
-  u_int8_t icmp_header_len = 8; // in bytes
+  u_int32_t last_packet_src = 0;
+  u_int32_t elapsed_usecs = 0;
 
-  fprintf(stdout, "%d.", act_ttl);
-  for(int i = 0; i < n_pcks && last_packets_cnt < max_pcks; ++i) {
-    struct record_in* act = &recs_in[i];
+  printf("%d.", ttl);
 
-    struct iphdr* ip_header = (struct iphdr*) act->packet;
+  if(n_pcks <= 0) {
+      printf(" *\n");
+      return;
+    }
 
-    u_int8_t ip_header_len = 4 * ip_header->ihl;
-    u_int8_t* icmp_packet = act->packet + ip_header_len;
-
-    struct icmphdr* icmp_header = (struct icmphdr*) icmp_packet;
-
-    if(icmp_header->type == 11) {
-      u_int8_t* icmp_data_ip_header = (void *)(icmp_header) + icmp_header_len;
-      struct icmphdr* icmp_data_icmp_header = (struct icmphdr*)(icmp_data_ip_header + ip_header_len);
-
-      if(ntohs(icmp_data_icmp_header->un.echo.id) == pid) {
-        u_int16_t seq = ntohs(icmp_data_icmp_header->un.echo.sequence);
-        if(recs_out[seq].ttl == act_ttl) { // display only current packets
-          bzero(sender_ip_str, sizeof sender_ip_str);
-          inet_ntop(AF_INET, &(act->sender.sin_addr), sender_ip_str, sizeof(sender_ip_str));
-
-          if(last_packet_src == 0 || (last_packet_src != act->sender.sin_addr.s_addr))
-            fprintf(stdout, " %s", sender_ip_str);
-          last_packet_src = act->sender.sin_addr.s_addr;
-
-          last_packets_cnt++;
-          av_time += (act->time.tv_sec + (double)(act->time.tv_usec) / 10e6 -
-                      (recs_out[seq].time.tv_sec + (double)(recs_out[seq].time.tv_usec) / 10e6)) / n_pcks;
-        }
-      }
-    } else if(icmp_header->type == 0) { // TODO: change numbers to appropriate constants
+  for(int i = 0; i < n_pcks; ++i) {
+    struct sockaddr_in cur_sender = recs_in->sender;
+    if(last_packet_src != cur_sender.sin_addr.s_addr) {
       bzero(sender_ip_str, sizeof sender_ip_str);
-      inet_ntop(AF_INET, &(act->sender.sin_addr), sender_ip_str, sizeof(sender_ip_str));
-      u_int16_t seq = ntohs(icmp_header->un.echo.sequence);
-      av_time = (act->time.tv_sec + act->time.tv_usec / 10e6 -
-                 (recs_out[seq].time.tv_sec + recs_out[seq].time.tv_usec / 10e6));
-      fprintf(stdout, " %s %2.2fms\n", sender_ip_str, 10e3 * av_time);
-      return 0;
-    } // ignore otherwise
+      inet_ntop(AF_INET, &(cur_sender.sin_addr), sender_ip_str, sizeof(sender_ip_str));
+      printf(" %s", sender_ip_str);
+    }
+
+    // calc. time
+    int seq;
+    get_packet_info((recs_in + i)->packet, &seq, NULL, NULL);
+    for(int j = 0; j < max_packets; ++j) {
+      if((recs_out + j)->seq == seq) {
+        u_int32_t before = (recs_out + j)->time.tv_sec * 10e6 + (recs_out + j)->time.tv_usec;
+        u_int32_t after  = (recs_in + i)->time.tv_sec * 10e6 + (recs_in + i)->time.tv_usec;
+
+        elapsed_usecs += after - before;
+      }
+    }
+
+    last_packet_src = cur_sender.sin_addr.s_addr;
   }
 
-  if(last_packets_cnt == 0)
-    fprintf(stdout, "*");
-  else if(last_packets_cnt == n_pcks)
-    fprintf(stdout, " %2.2fms", 10e3 * av_time);
-  else
-    fprintf(stdout, " ???");
+  if(n_pcks != max_packets)
+    printf(" ???");
+  else {
+    printf(" %lums", (elapsed_usecs / n_pcks) / 1000);
+  }
 
-  puts("");
-  return 1;
-}
-
-void cleanup(struct record_in* recs_in, int n)
-{
-  // TODO
+  printf("\n");
 }
 
 ssize_t traceloop(struct sockaddr_in* addr_to)
@@ -217,31 +243,32 @@ ssize_t traceloop(struct sockaddr_in* addr_to)
   int ttl = 1;
   const int n_packets = 3;
   const int ttl_max   = 30;
-  const int buf_max   = 1000;
   const int tm_lim    = 1; // 1 sec
 
-  struct record_out records_out[buf_max];
-  struct record_in records_in[buf_max];
+  struct record_out records_out[n_packets];
+  struct record_in  records_in[n_packets];
 
   int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
   if (sockfd < 0) {
 		fprintf(stderr, "socket error: %s\n", strerror(errno));
-		return -3;
+		return -1;
 	}
 
   for(int i = 0; i < ttl_max; ++i) {
-    for(int j = 0; j < n_packets; ++j) {
-      send_packet(addr_to, records_out, sockfd, &ttl);
+    for(int j = 0; j < n_packets; ++j)
+      send_packet(sockfd, addr_to, records_out + j, &ttl);
+
+    ssize_t n = get_packets(sockfd, records_in, n_packets, tm_lim, ttl);
+
+    display_packets_info(records_out, records_in, n, n_packets, ttl);
+    if(n > 0) {
+      int type;
+      get_packet_info(records_in[0].packet, NULL, NULL, &type);
+      if(type == ICMP_ECHOREPLY)
+        break;
     }
 
-    ssize_t n = get_packets(records_in, sockfd, n_packets, buf_max, tm_lim);
-
-    int cd = display_packets_info(records_out, records_in, n, ttl, n_packets);
-    cleanup(records_in, n);
     ++ttl;
-
-    if(! cd)
-      break;
   }
 
   return EXIT_SUCCESS;
@@ -257,7 +284,7 @@ int main(int argc, char** argv)
   struct sockaddr_in addr;
   bzero(&addr, sizeof(addr));
   if(! inet_pton(AF_INET, argv[1], &(addr.sin_addr))) {
-    fprintf(stderr, "error: %s\n", strerror(errno));
+    fprintf(stderr, "Address ip is not correct.\n");
     return EXIT_FAILURE;
   }
   addr.sin_family = AF_INET;
