@@ -9,6 +9,7 @@
 #include <netinet/ip_icmp.h>
 #include <sys/time.h>
 #include <limits.h>
+#include <time.h>
 
 /* GLOBALS */
 pid_t pid = -1;
@@ -17,11 +18,6 @@ int seq_num = 0;
 
 /* STRUCTS */
 
-// struktura, która identyfikuje wysłany pakiet
-// Używa do tego wartości, które oznaczają kolejno:
-// - ttl, z którym pakiet opuszcza program
-// - numer sekwencyjny, który został mu przydzielony
-// - czas, w którym został nadany
 struct record_out {
   int ttl;
   int seq;
@@ -134,6 +130,7 @@ void get_packet_info(u_int8_t* packet, int* seq, int* pid, int* type)
   if(type)
     *type = icmp_header->type;
 
+
   if(icmp_header->type == ICMP_TIME_EXCEEDED) {
     u_int8_t* icmp_data_ip_header = (void *)(icmp_header) + icmp_header_len;
     struct icmphdr* icmp_data_icmp_header = (struct icmphdr*)(icmp_data_ip_header + ip_header_len);
@@ -185,19 +182,11 @@ ssize_t get_packets(int sockfd, struct record_in* recs_in, int n_pcks, int tm_li
   return cnt;
 }
 
-void print_as_bytes (unsigned char* buff, ssize_t length)
-{
-	for (ssize_t i = 0; i < length; i++, buff++)
-		printf ("%.2x ", *buff);
-  printf("\n");
-}
-
-
 void display_packets_info(struct record_out* recs_out, struct record_in* recs_in, ssize_t n_pcks, ssize_t max_packets, int ttl)
 {
   char sender_ip_str[20];
   u_int32_t last_packet_src = 0;
-  u_int32_t elapsed_usecs = 0;
+  int32_t elapsed_usecs = 0.0;
 
   printf("%d.", ttl);
 
@@ -217,22 +206,24 @@ void display_packets_info(struct record_out* recs_out, struct record_in* recs_in
     // calc. time
     int seq;
     get_packet_info((recs_in + i)->packet, &seq, NULL, NULL);
-    for(int j = 0; j < max_packets; ++j) {
+    for(int j = 0; j < n_pcks; ++j) {
       if((recs_out + j)->seq == seq) {
-        u_int32_t before = (recs_out + j)->time.tv_sec * 10e6 + (recs_out + j)->time.tv_usec;
-        u_int32_t after  = (recs_in + i)->time.tv_sec * 10e6 + (recs_in + i)->time.tv_usec;
+        int32_t sec_diff  = (recs_in + i)->time.tv_sec - (recs_out + j)->time.tv_sec;
+        int32_t usec_diff = sec_diff > 0 ? (1000000 - (recs_out + j)->time.tv_usec + (recs_in + i)->time.tv_usec)
+          : ((recs_in + i)->time.tv_usec - (recs_out + j)->time.tv_usec);
 
-        elapsed_usecs += after - before;
+        elapsed_usecs += sec_diff > 0 ? (sec_diff - 1) * 1000000 + usec_diff : usec_diff;
+
+        break;
       }
     }
 
     last_packet_src = cur_sender.sin_addr.s_addr;
   }
-
   if(n_pcks != max_packets)
     printf(" ???");
   else {
-    printf(" %lums", (elapsed_usecs / n_pcks) / 1000);
+    printf(" %ldms", (elapsed_usecs / n_pcks) / 1000);
   }
 
   printf("\n");
