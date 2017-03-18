@@ -51,7 +51,7 @@ ssize_t traceloop(struct sockaddr_in* addr_to)
 int main(int argc, char** argv)
 {
   if(argc != 2) {
-    print_usage(); // czy na pewno na stdout?
+    print_usage();
     return EXIT_FAILURE;
   }
 
