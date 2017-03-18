@@ -10,18 +10,40 @@ ssize_t is_record_from_current_round(struct record_in* rec, int seq_min, int seq
   return seq >= seq_min && seq <= seq_max;
 }
 
+void get_time_left(struct timeval to_pass, struct timeval before, struct timeval after, struct timeval* result)
+{
+  if(! result)
+    return;
+
+  double seconds_passed = (after.tv_sec - before.tv_sec) + ((double)(after.tv_usec - before.tv_usec))/ 1000000;
+  double seconds_to_pass = to_pass.tv_sec + (double)(to_pass.tv_usec) / 1000000;
+
+  double seconds_left = seconds_to_pass - seconds_passed;
+  if(seconds_left <= 0)
+    result->tv_sec = result->tv_usec = 0;
+  else {
+    result->tv_sec  = seconds_left / 1000000;
+    result->tv_usec = (seconds_left - (seconds_left / 1000000)) * 1000000;
+  }
+}
+
 ssize_t get_packet(int sockfd, struct timeval* tv, struct record_in* rec_in)
 {
   struct sockaddr_in sender;
   socklen_t          sender_len = sizeof(sender);
   u_int8_t           buffer[IP_MAXPACKET+1];
   fd_set             descriptors;
+  struct timeval     to_pass, time_before, time_after;
 
   FD_ZERO(&descriptors);
   FD_SET(sockfd, &descriptors);
 
-  // TODO: handle timeout by hand
+  to_pass = *tv;
+  gettimeofday(&time_before, NULL);
   int ready = select(sockfd+1, &descriptors, NULL, NULL, tv);
+  gettimeofday(&time_after, NULL);
+
+  get_time_left(to_pass, time_before, time_after, tv);
 
   if(ready == -1) {
     fprintf(stderr, "get_packet error: %s\n", strerror(errno));

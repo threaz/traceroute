@@ -7,7 +7,7 @@ void display_packets_info(struct record_out* recs_out, struct record_in* recs_in
 {
   char sender_ip_str[20];
   u_int32_t last_packet_src = 0;
-  int32_t elapsed_usecs = 0.0;
+  double elapsed = 0.0;
 
   printf("%d.", ttl);
 
@@ -27,14 +27,13 @@ void display_packets_info(struct record_out* recs_out, struct record_in* recs_in
     // calc. time
     int seq;
     get_packet_info((recs_in + i)->packet, &seq, NULL, NULL);
+
+
     for(int j = 0; j < n_pcks; ++j) {
       if((recs_out + j)->seq == seq) {
-        int32_t sec_diff  = (recs_in + i)->time.tv_sec - (recs_out + j)->time.tv_sec;
-        int32_t usec_diff = sec_diff > 0 ? (1000000 - (recs_out + j)->time.tv_usec + (recs_in + i)->time.tv_usec)
-          : ((recs_in + i)->time.tv_usec - (recs_out + j)->time.tv_usec);
-
-        elapsed_usecs += sec_diff > 0 ? (sec_diff - 1) * 1000000 + usec_diff : usec_diff;
-
+        double hop_time =  (recs_in + i)->time.tv_sec - (recs_out + j)->time.tv_sec +
+          ((double)((recs_in + i)->time.tv_usec - (recs_out + j)->time.tv_usec)) / 1000000;
+        elapsed += hop_time;
         break;
       }
     }
@@ -44,7 +43,7 @@ void display_packets_info(struct record_out* recs_out, struct record_in* recs_in
   if(n_pcks != max_packets)
     printf(" ???");
   else {
-    printf(" %ldms", (elapsed_usecs / n_pcks) / 1000);
+    printf(" %.0fms", (elapsed / n_pcks) * 1000);
   }
 
   printf("\n");
