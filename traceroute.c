@@ -64,6 +64,6 @@ int main(int argc, char** argv)
   addr.sin_family = AF_INET;
   pid = getpid();
 
-  traceloop(&addr);
-  return EXIT_SUCCESS;
+  int status = traceloop(&addr);
+  return status;
 }
