@@ -3,7 +3,8 @@
 
 #include "display_packets.h"
 
-void display_packets_info(struct record_out* recs_out, struct record_in* recs_in, ssize_t n_pcks, ssize_t max_packets, int ttl)
+void display_packets_info(struct record_out* recs_out, struct record_in* recs_in,
+                          ssize_t n_pcks, ssize_t max_packets, int ttl)
 {
   char sender_ip_str[20];
   u_int32_t last_packet_src = 0;

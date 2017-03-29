@@ -5,9 +5,9 @@
 
 ssize_t is_record_from_current_round(struct record_in* rec, int seq_min, int seq_max)
 {
-  int seq;
-  get_packet_info(rec->packet, &seq, NULL, NULL);
-  return seq >= seq_min && seq <= seq_max;
+  int seq, rec_pid;
+  get_packet_info(rec->packet, &seq, &rec_pid, NULL);
+  return (seq >= seq_min && seq <= seq_max) && (rec_pid == pid);
 }
 
 void get_time_left(struct timeval to_pass, struct timeval before, struct timeval after, struct timeval* result)

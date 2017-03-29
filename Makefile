@@ -1,4 +1,4 @@
-Flags = -std=gnu99 -Wall -W
+Flags = -std=gnu99 -Wall -Wextra
 CP = gcc
 
 
